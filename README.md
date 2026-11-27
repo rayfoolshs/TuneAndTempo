@@ -6,6 +6,8 @@ after the first load. Built for an iPhone first and a iPad too.
 
 **Live on GitHub Pages: [https://rayfoolshs.github.io/TuneAndTempo/](https://rayfoolshs.github.io/TuneAndTempo/)**
 
+![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)
+
 ![Tuner](screenshots/tuner-light.png)
 
 <p align="center">
@@ -151,3 +153,7 @@ tools/make-icons.mjs  regenerates the icons (node tools/make-icons.mjs)
   every version agrees.
 - Chord transposition spells notes with sharps. Capo 3 on Bb reads as C#, not
   Db. The pitch is right; only the spelling is opinionated.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
