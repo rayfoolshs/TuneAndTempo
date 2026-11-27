@@ -314,3 +314,70 @@ export function drum(voice, when, volume = 0.7) {
     n.onended = () => { try { g.disconnect(); bp.disconnect(); } catch { /* gone */ } };
   }
 }
+
+/* ── sweet-spot ding ─────────────────────────────────────── */
+
+export function ding() {
+  const c = context();
+  const osc = c.createOscillator();
+  const gain = c.createGain();
+  const t0 = c.currentTime + 0.005;
+
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(1046.5, t0);
+
+  gain.gain.setValueAtTime(0.0001, t0);
+  gain.gain.exponentialRampToValueAtTime(0.14, t0 + 0.012);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.24);
+
+  osc.connect(gain);
+  gain.connect(masterGain());
+  osc.start(t0);
+  osc.stop(t0 + 0.28);
+  osc.onended = () => { try { gain.disconnect(); } catch { /* gone */ } };
+}
+
+/* ── sustained reference tone (hold to hear) ─────────────── */
+
+let sustained = null;
+
+export function startSustainedTone(freq, { gain = 0.2 } = {}) {
+  const c = context();
+  if (sustained) stopSustainedTone();
+  const osc = c.createOscillator();
+  const g = c.createGain();
+  const t0 = c.currentTime + 0.02;
+
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(freq, t0);
+
+  g.gain.setValueAtTime(0.0001, t0);
+  g.gain.exponentialRampToValueAtTime(gain, t0 + 0.04);
+
+  osc.connect(g);
+  g.connect(masterGain());
+  osc.start(t0);
+
+  let stopped = false;
+  const handle = {
+    stop(fade = 0.06) {
+      if (stopped) return;
+      stopped = true;
+      const t = c.currentTime;
+      try {
+        g.gain.cancelScheduledValues(t);
+        g.gain.setValueAtTime(Math.max(g.gain.value, 0.0001), t);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + fade);
+      } catch { /* clock gone */ }
+      try { osc.stop(t + fade + 0.05); } catch { /* already stopped */ }
+      try { osc.disconnect(); g.disconnect(); } catch { /* already gone */ }
+      if (sustained === handle) sustained = null;
+    }
+  };
+  sustained = handle;
+  return handle;
+}
+
+export function stopSustainedTone() {
+  if (sustained) sustained.stop();
+}

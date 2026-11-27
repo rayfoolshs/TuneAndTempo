@@ -1,10 +1,12 @@
 import * as audio from './audio.js';
-import { detectPitch, PitchSmoother } from './pitch.js';
+import { detectPitch, rms, PitchSmoother } from './pitch.js';
 import { INSTRUMENTS, stringsFor, midiToFreq, noteName } from './tuner-data.js';
 import { get, update } from './state.js';
 
 const IN_TUNE = 5;
 const STRING_WINDOW = 180;
+const DWELL_MS = 220;
+const CONFIDENCE = 0.55;
 
 export function mountTuner({ beforeStart } = {}) {
   const el = {
@@ -12,6 +14,7 @@ export function mountTuner({ beforeStart } = {}) {
     card: document.querySelector('.tuner-card'),
     note: document.getElementById('noteName'),
     octave: document.getElementById('noteOctave'),
+    freq: document.getElementById('freqText'),
     cents: document.getElementById('centsText'),
     needle: document.getElementById('needle'),
     ticks: document.getElementById('gaugeTicks'),
@@ -27,6 +30,7 @@ export function mountTuner({ beforeStart } = {}) {
 
   let stream = null;
   let source = null;
+  let filter = null;
   let analyser = null;
   let buf = null;
   let raf = 0;
@@ -34,6 +38,15 @@ export function mountTuner({ beforeStart } = {}) {
   let targetIndex = -1;
   let lastDetect = 0;
   let suspendUntil = 0;
+  let baselineRms = 0;
+  let needleT = 0;
+  let inTuneSince = 0;
+  let inTuneLatched = false;
+  let pulseTimeout = 0;
+  let holdToken = 0;
+  let holdCtx = null;
+  let holdTone = null;
+  let holdStartedAt = 0;
   const smoother = new PitchSmoother(3);
 
   buildTicks();
@@ -66,9 +79,10 @@ export function mountTuner({ beforeStart } = {}) {
     el.ticks.innerHTML = html;
   }
 
-  /* ── rendering ─────────────────────────────────────────── */
+  /* ── status / rendering helpers ─────────────────────────── */
 
   function setStatus(text, warn = false) {
+    if (el.status.textContent === text && el.status.classList.contains('warn') === Boolean(warn)) return;
     el.status.textContent = text;
     el.status.classList.toggle('warn', Boolean(warn));
   }
@@ -79,77 +93,49 @@ export function mountTuner({ beforeStart } = {}) {
     el.card.classList.toggle('sharp', cents > IN_TUNE);
   }
 
-  function idle() {
-    el.note.textContent = '';
-    el.octave.textContent = '';
-    el.cents.textContent = running ? 'listening…' : '';
-    el.needle.style.transform = 'rotate(0deg)';
-    el.card.classList.remove('on-pitch', 'flat', 'sharp');
-    for (const b of el.strip.children) b.classList.remove('hit');
+  function resetInTune() {
+    inTuneSince = 0;
+    inTuneLatched = false;
   }
 
-  function paint(freq) {
-    const a4 = get().calibration;
-    const list = strings();
+  function clearVisuals() {
+    el.note.textContent = '';
+    el.octave.textContent = '';
+    if (el.freq) el.freq.textContent = '';
+    el.cents.textContent = '';
+    el.card.classList.remove('on-pitch', 'flat', 'sharp', 'stale', 'tuned-pulse');
+    for (const b of el.strip.children) b.classList.remove('hit');
+    resetInTune();
+  }
 
-    let midi = 69;
-    let cents = 0;
-    let hitIndex = -1;
+  function pulseCard() {
+    el.card.classList.remove('tuned-pulse');
+    void el.card.offsetWidth; /* restart the animation */
+    el.card.classList.add('tuned-pulse');
+    if (pulseTimeout) clearTimeout(pulseTimeout);
+    pulseTimeout = setTimeout(() => el.card.classList.remove('tuned-pulse'), 650);
+  }
 
-    if (list.length && targetIndex >= 0 && list[targetIndex]) {
-      midi = list[targetIndex].midi;
-      cents = 1200 * Math.log2(freq / midiToFreq(midi, a4));
-      hitIndex = targetIndex;
-    } else if (list.length) {
-      let bestCents = Infinity;
-      let bestIndex = -1;
-      list.forEach((s, i) => {
-        const c = 1200 * Math.log2(freq / midiToFreq(s.midi, a4));
-        if (Math.abs(c) < Math.abs(bestCents)) {
-          bestCents = c;
-          bestIndex = i;
-        }
-      });
-      if (Math.abs(bestCents) <= STRING_WINDOW) {
-        cents = bestCents;
-        midi = list[bestIndex].midi;
-        hitIndex = bestIndex;
-      } else {
-        const exact = 69 + 12 * Math.log2(freq / a4);
-        midi = Math.round(exact);
-        cents = (exact - midi) * 100;
-      }
-    } else {
-      const exact = 69 + 12 * Math.log2(freq / a4);
-      midi = Math.round(exact);
-      cents = (exact - midi) * 100;
+  function withLockSuffix(text, locked) {
+    if (!locked) return text;
+    const oct = noteName(locked.midi).octave;
+    return `${text} · locked to ${locked.label}${oct}`;
+  }
+
+  /* ── noise floor + filtering ────────────────────────────── */
+
+  function trackBaseline(rmsNow) {
+    /* Learn only from quiet frames, never from playing — otherwise a
+       loud first frame would pin the floor underneath a pluck. */
+    if (rmsNow < 0.02) {
+      baselineRms = baselineRms ? baselineRms * 0.92 + rmsNow * 0.08 : rmsNow;
     }
+  }
 
-    const nm = noteName(midi);
-    el.note.textContent = nm.name;
-    el.octave.textContent = String(nm.octave);
-
-    if (Math.abs(cents) < 0.5) {
-      el.cents.textContent = 'in tune';
-    } else {
-      el.cents.textContent = `${cents > 0 ? '+' : ''}${cents.toFixed(0)}¢`;
-    }
-
-    const clamped = Math.max(-50, Math.min(50, cents));
-    el.needle.style.transform = `rotate(${(clamped / 50) * 90}deg)`;
-    setCentsClass(cents);
-
-    if (Math.abs(cents) <= IN_TUNE) {
-      setStatus(`In tune · ${nm.name}${nm.octave}`);
-    } else if (cents < 0) {
-      setStatus(`Tune up · ${Math.abs(cents).toFixed(0)}¢ flat`);
-    } else {
-      setStatus(`Tune down · ${cents.toFixed(0)}¢ sharp`);
-    }
-
-    [...el.strip.children].forEach((b, i) => {
-      b.classList.toggle('hit', i === hitIndex && Math.abs(cents) <= 30);
-    });
+  function applyFilter() {
+    if (!filter) return;
+    const spec = INSTRUMENTS[get().instrument] || INSTRUMENTS.guitar;
+    filter.frequency.value = spec.maxHz * 1.3;
   }
 
   /* ── string strip ──────────────────────────────────────── */
@@ -160,6 +146,7 @@ export function mountTuner({ beforeStart } = {}) {
 
   function buildStrip() {
     const list = strings();
+    const a4 = get().calibration;
     el.strip.innerHTML = '';
     if (!list.length) return;
 
@@ -167,8 +154,9 @@ export function mountTuner({ beforeStart } = {}) {
       const b = document.createElement('button');
       b.type = 'button';
       const oct = noteName(s.midi).octave;
-      b.innerHTML = `${s.label}<span class="str-num">${oct}</span>`;
-      b.setAttribute('aria-label', `${s.label}${oct}`);
+      const freq = midiToFreq(s.midi, a4);
+      b.innerHTML = `${s.label}<span class="str-num">${oct} · ${freq.toFixed(1)} Hz</span>`;
+      b.setAttribute('aria-label', `${s.label}${oct} at ${freq.toFixed(1)} hertz`);
       b.classList.toggle('target', targetIndex === i);
       b.addEventListener('click', () => {
         targetIndex = targetIndex === i ? -1 : i;
@@ -176,6 +164,95 @@ export function mountTuner({ beforeStart } = {}) {
       });
       el.strip.append(b);
     });
+  }
+
+  /* ── rendering ─────────────────────────────────────────── */
+
+  function noteStale() {
+    el.card.classList.add('stale');
+    el.card.classList.remove('on-pitch', 'flat', 'sharp');
+    el.note.textContent = '';
+    el.octave.textContent = '';
+    if (el.freq) el.freq.textContent = '';
+    el.cents.textContent = running ? 'listening…' : '';
+    for (const b of el.strip.children) b.classList.remove('hit');
+    resetInTune();
+    setStatus('Listening… play a string.');
+  }
+
+  function paint(freq) {
+    const a4 = get().calibration;
+    const list = strings();
+
+    const exact = 69 + 12 * Math.log2(freq / a4);
+    const detectedMidi = Math.round(exact);
+    const detected = noteName(detectedMidi);
+    const locked = targetIndex >= 0 && targetIndex < list.length ? list[targetIndex] : null;
+
+    /* What is actually sounding — the strip shows the string in play. */
+    let detectedIndex = -1;
+    let detectedBestAbs = Infinity;
+    if (list.length) {
+      list.forEach((s, i) => {
+        const c = Math.abs(1200 * Math.log2(freq / midiToFreq(s.midi, a4)));
+        if (c < detectedBestAbs) { detectedBestAbs = c; detectedIndex = i; }
+      });
+      if (detectedBestAbs > STRING_WINDOW) detectedIndex = -1;
+    }
+
+    /* Needle target: the locked string, or the string in play, or the exact note. */
+    let cents;
+    if (locked) {
+      cents = 1200 * Math.log2(freq / midiToFreq(locked.midi, a4));
+    } else if (detectedIndex >= 0 && detectedBestAbs <= STRING_WINDOW) {
+      cents = 1200 * Math.log2(freq / midiToFreq(list[detectedIndex].midi, a4));
+    } else {
+      cents = (exact - detectedMidi) * 100;
+    }
+
+    el.note.textContent = detected.name;
+    el.octave.textContent = String(detected.octave);
+    if (el.freq) el.freq.textContent = `${freq.toFixed(1)} Hz`;
+
+    if (Math.abs(cents) < 0.5) {
+      el.cents.textContent = 'in tune';
+    } else {
+      el.cents.textContent = `${cents > 0 ? '+' : ''}${cents.toFixed(0)}¢`;
+    }
+
+    needleT += (cents - needleT) * 0.4;
+    const clamped = Math.max(-50, Math.min(50, needleT));
+    el.needle.style.transform = `rotate(${(clamped / 50) * 90}deg)`;
+    setCentsClass(cents);
+    el.card.classList.remove('stale');
+
+    const within = Math.abs(cents) <= IN_TUNE;
+    const now = performance.now();
+    if (within) {
+      if (!inTuneSince) inTuneSince = now;
+      if (!inTuneLatched && now - inTuneSince >= DWELL_MS) {
+        inTuneLatched = true;
+        setStatus(withLockSuffix(`In tune · ${detected.name}${detected.octave}`, locked));
+        audio.ding();
+        pulseCard();
+        if (!locked && detectedIndex >= 0) {
+          targetIndex = detectedIndex;
+          buildStrip();
+        }
+      }
+    } else {
+      resetInTune();
+      const words = cents < 0
+        ? `Tune up · ${Math.abs(cents).toFixed(0)}¢ flat`
+        : `Tune down · ${cents.toFixed(0)}¢ sharp`;
+      setStatus(withLockSuffix(words, locked));
+    }
+
+    let idx = 0;
+    for (const b of el.strip.children) {
+      const i = idx++;
+      b.classList.toggle('hit', i === detectedIndex && detectedBestAbs <= 30);
+    }
   }
 
   /* ── detection loop ────────────────────────────────────── */
@@ -187,15 +264,22 @@ export function mountTuner({ beforeStart } = {}) {
     if (ts - lastDetect < 45) return;
     lastDetect = ts;
 
-    analyser.getFloatTimeDomainData(buf);
     const spec = INSTRUMENTS[get().instrument] || INSTRUMENTS.guitar;
+    analyser.getFloatTimeDomainData(buf);
+
+    const rmsNow = rms(buf);
+    trackBaseline(rmsNow);
+    const minRms = Math.max(0.006, baselineRms * 1.8);
+
     const result = detectPitch(buf, audio.context().sampleRate, {
       minHz: spec.minHz,
-      maxHz: spec.maxHz
+      maxHz: spec.maxHz,
+      minRms
     });
 
-    const stable = smoother.push(result ? result.freq : null);
-    if (stable == null) { idle(); return; }
+    const confident = result && result.clarity >= CONFIDENCE;
+    const stable = confident ? smoother.push(result.freq) : smoother.push(null);
+    if (stable == null) { noteStale(); return; }
     paint(stable);
   }
 
@@ -235,17 +319,27 @@ export function mountTuner({ beforeStart } = {}) {
     }
 
     const ctx = audio.context();
+    const spec = INSTRUMENTS[get().instrument] || INSTRUMENTS.guitar;
     source = ctx.createMediaStreamSource(stream);
+    filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = spec.maxHz * 1.3;
+    filter.Q.value = 0.6;
     analyser = ctx.createAnalyser();
     analyser.fftSize = 4096;
     analyser.smoothingTimeConstant = 0;
-    source.connect(analyser);
+    source.connect(filter);
+    filter.connect(analyser);
     buf = new Float32Array(analyser.fftSize);
 
     running = true;
     audio.setMode('tuner');
     smoother.reset();
+    needleT = 0;
+    baselineRms = 0;
     lastDetect = 0;
+    resetInTune();
+    el.card.classList.remove('stale');
     el.micBtn.classList.add('recording');
     el.micLabel.textContent = 'Stop listening';
     setStatus('Listening… play a string.');
@@ -257,32 +351,83 @@ export function mountTuner({ beforeStart } = {}) {
     running = false;
     cancelAnimationFrame(raf);
     raf = 0;
+    holdToken += 1;
+    audio.stopSustainedTone();
+    holdTone = null;
+    holdCtx = null;
     if (source) { try { source.disconnect(); } catch { /* gone */ } }
+    if (filter) { try { filter.disconnect(); } catch { /* gone */ } }
     if (stream) stream.getTracks().forEach((track) => track.stop());
     source = null;
     stream = null;
+    filter = null;
     analyser = null;
     audio.setMode('off');
     el.micBtn.classList.remove('recording');
     el.micLabel.textContent = 'Start listening';
+    needleT = 0;
+    el.needle.style.transform = 'rotate(0deg)';
+    if (pulseTimeout) { clearTimeout(pulseTimeout); pulseTimeout = 0; }
+    clearVisuals();
     setStatus('Microphone off. Nothing is being recorded.');
-    idle();
   }
 
-  async function playReference() {
+  /* ── reference tone (hold to play) ──────────────────────── */
+
+  function playFreqFor() {
     const list = strings();
     const a4 = get().calibration;
-    const index = targetIndex >= 0 ? targetIndex : 0;
-    await audio.unlock();
-
+    const index = targetIndex >= 0 && targetIndex < list.length ? targetIndex : 0;
     const midi = list.length ? list[index].midi : 69;
-    suspendUntil = performance.now() + 1900;
-    smoother.reset();
-    audio.playTone(midiToFreq(midi, a4), { duration: 1.7, gain: 0.2 });
-
-    const nm = noteName(midi);
-    setStatus(`Reference tone · ${nm.name}${nm.octave}`);
+    return { midi, a4, nm: noteName(midi) };
   }
+
+  function beginHold() {
+    const my = ++holdToken;
+    const ctx = playFreqFor();
+    holdCtx = ctx;
+    holdStartedAt = performance.now();
+    suspendUntil = performance.now() + 999999;
+    smoother.reset();
+    audio.unlock().then(() => {
+      if (my !== holdToken || !holdCtx) return;
+      holdTone = audio.startSustainedTone(midiToFreq(ctx.midi, ctx.a4), { gain: 0.2 });
+      setStatus(`Reference tone · ${ctx.nm.name}${ctx.nm.octave}`);
+    }).catch(() => {});
+  }
+
+  async function endHold() {
+    if (!holdCtx) return;
+    const heldMs = performance.now() - holdStartedAt;
+    const ctx = holdCtx;
+    holdCtx = null;
+    holdToken += 1;
+    audio.stopSustainedTone();
+    holdTone = null;
+    suspendUntil = performance.now() + 150;
+
+    if (heldMs < 250) {
+      /* Quick tap: one short reference tone after release. */
+      await audio.unlock();
+      audio.playTone(midiToFreq(ctx.midi, ctx.a4), { duration: 1.15, gain: 0.2 });
+      suspendUntil = performance.now() + 1250;
+      setStatus(`Reference tone · ${ctx.nm.name}${ctx.nm.octave}`);
+    } else {
+      setStatus('Listening… play a string.');
+    }
+  }
+
+  function bindToneButton() {
+    el.toneBtn.addEventListener('pointerdown', (ev) => {
+      ev.preventDefault();
+      beginHold();
+    });
+    el.toneBtn.addEventListener('pointerup', () => { endHold(); });
+    el.toneBtn.addEventListener('pointercancel', () => { endHold(); });
+    el.toneBtn.addEventListener('pointerleave', () => { endHold(); });
+    el.toneBtn.addEventListener('contextmenu', (ev) => ev.preventDefault());
+  }
+  bindToneButton();
 
   /* ── wiring ────────────────────────────────────────────── */
 
@@ -292,14 +437,15 @@ export function mountTuner({ beforeStart } = {}) {
     update((s) => { s.instrument = btn.dataset.instrument; });
     targetIndex = -1;
     smoother.reset();
-    idle();
+    clearVisuals();
+    applyFilter();
   });
 
   el.lowG.addEventListener('change', () => {
     update((s) => { s.lowG = el.lowG.checked; });
     targetIndex = -1;
     smoother.reset();
-    idle();
+    clearVisuals();
   });
 
   document.querySelectorAll('[data-cal]').forEach((btn) => {
@@ -314,8 +460,6 @@ export function mountTuner({ beforeStart } = {}) {
     else start();
   });
 
-  el.toneBtn.addEventListener('click', () => { playReference(); });
-
   /* ── refresh from state ────────────────────────────────── */
 
   function refresh() {
@@ -327,6 +471,7 @@ export function mountTuner({ beforeStart } = {}) {
     el.lowGRow.hidden = s.instrument !== 'ukulele';
     el.lowG.checked = s.lowG;
     el.toneBtn.disabled = false;
+    applyFilter();
     buildStrip();
   }
 

@@ -219,9 +219,9 @@ main::-webkit-scrollbar { display: none; }
 
 .tuner-card { padding-bottom: 12px; }
 
-.gauge-wrap { position: relative; padding-top: 4px; }
+.gauge-wrap { position: relative; padding-top: 4px; transition: opacity .25s; }
 
-.gauge { width: 100%; height: auto; max-height: 190px; overflow: visible; }
+.gauge { width: 100%; height: auto; max-height: 190px; overflow: visible; transition: opacity .25s; }
 .gauge-arc {
   fill: none;
   stroke: var(--line);
@@ -239,7 +239,7 @@ main::-webkit-scrollbar { display: none; }
   stroke-linecap: round;
   transform-box: view-box;
   transform-origin: 150px 142px;
-  transition: transform .09s linear;
+  transition: transform 130ms ease-out;
 }
 .on-pitch .gauge-arc.mine { opacity: 1; stroke-width: 6; }
 .on-pitch .needle { stroke: var(--accent); }
@@ -248,7 +248,30 @@ main::-webkit-scrollbar { display: none; }
 
 .gauge-hub { fill: var(--bg-elev); stroke: var(--line); stroke-width: 2; }
 
+.freq {
+  font-size: 12px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.tuner-card.stale .gauge { opacity: .35; }
+.tuner-card.stale .readout { opacity: .55; }
+
+@keyframes pulseRing {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent); }
+  100% { box-shadow: 0 0 0 9px transparent; }
+}
+.tuner-card.tuned-pulse { animation: pulseRing .6s ease-out; }
+
+#toneBtn {
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
 .readout {
+  transition: opacity .25s;
   position: absolute;
   left: 0; right: 0;
   bottom: 6px;

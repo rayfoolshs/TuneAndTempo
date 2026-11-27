@@ -1,6 +1,6 @@
 /* Offline cache. Bump VERSION to ship an update. */
 
-const VERSION = 'tune-tempo-v5';
+const VERSION = 'tune-tempo-v6';
 
 const ASSETS = [
   './',

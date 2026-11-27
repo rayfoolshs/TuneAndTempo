@@ -4,6 +4,8 @@ A guitar, bass and ukulele tuner with a shuffle-aware metronome and a 75-shape
 chord library. One small web app, no build step, no accounts, no network calls
 after the first load. Built for an iPhone first and a iPad too.
 
+**Live on GitHub Pages: [https://rayfoolshs.github.io/TuneAndTempo/](https://rayfoolshs.github.io/TuneAndTempo/)**
+
 ![Tuner](screenshots/tuner-light.png)
 
 <p align="center">
@@ -24,16 +26,22 @@ Open <http://localhost:4173>. The microphone needs `localhost` or `https://` —
 
 ## Put it on the phone
 
-1. Host the folder somewhere over HTTPS. GitHub Pages, Netlify drop, Cloudflare
-   Pages and Vercel all work with no configuration; the app is plain static
-   files. Keep the folder structure intact.
-2. On the iPhone or iPad open the HTTPS address **in Safari**.
-3. Allow the microphone when the tuner asks. Do this before installing, so the
+**The live app is served from GitHub Pages** at
+[https://rayfoolshs.github.io/TuneAndTempo/](https://rayfoolshs.github.io/TuneAndTempo/) —
+no hosting setup, sign-in or app store needed.
+
+1. On the iPhone or iPad open that address **in Safari**.
+2. Allow the microphone when the tuner asks. Do this before installing, so the
    permission is remembered for the installed app.
-4. Share → **Add to Home Screen**.
+3. Share → **Add to Home Screen**.
 
 After that first load every file is precached by `sw.js`, so the app opens and
 runs with no connection at all.
+
+If you want to host your own copy, the same steps work on any static host
+(GitHub Pages, Netlify Drop, Cloudflare Pages, Vercel — no configuration
+needed): keep the folder structure intact and open the HTTPS address in
+Safari.
 
 ## What is in it
 
@@ -41,11 +49,20 @@ runs with no connection at all.
 - Guitar (EADGBE), bass (EADG), ukulele (GCEA, with a low-G switch) and
   chromatic.
 - Autocorrelation pitch detection, ~20 reads a second, median-filtered so the
-  needle does not twitch. Tested within ±0.3 cents from 30 Hz to 1047 Hz.
-- A ±50 cent needle, a colour state (flat / in tune / sharp) and the nearest
-  string highlighted as you play.
-- Tap a string to lock onto it, tap again to go back to automatic.
-- A4 calibration from 435 to 445 Hz, and a reference tone per string.
+  needle does not twitch. The mic path is lowpass-filtered to the instrument's
+  band, and a clarity gate plus an adaptive noise floor ignore doubtful reads
+  and background rumble. Tested within ±0.3 cents from 30 Hz to 1047 Hz.
+- A ±50 cent needle that glides instead of jumping frame to frame, a colour
+  state (flat / in tune / sharp), a Hz readout and the string in play
+  highlighted as you play. It only goes green after ~220 ms inside the zone —
+  the needle does not blink on a lucky frame — and plays a short ding when
+  you land on it.
+- Tap a string to lock onto it, tap again to go back to automatic. You also
+  land locked automatically when you hit in-tune.
+- Press and hold the Tone button to hear the reference pitch, release to
+  listen; a quick tap plays a short one-shot instead.
+- A4 calibration from 435 to 445 Hz, with the target frequency shown on every
+  string.
 - The microphone is released the moment you leave the tuner, so the orange
   recording dot goes away.
 

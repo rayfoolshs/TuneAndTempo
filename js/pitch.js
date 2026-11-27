@@ -14,7 +14,7 @@ export function rms(buf) {
   return Math.sqrt(sum / buf.length);
 }
 
-export function detectPitch(input, sampleRate, { minHz = 40, maxHz = 1200 } = {}) {
+export function detectPitch(input, sampleRate, { minHz = 40, maxHz = 1200, minRms = 0.006 } = {}) {
   let buf = input;
   let sr = sampleRate;
   let minLag = Math.max(2, Math.floor(sr / maxHz));
@@ -36,7 +36,7 @@ export function detectPitch(input, sampleRate, { minHz = 40, maxHz = 1200 } = {}
 
   let energy = 0;
   for (let i = 0; i < n; i++) energy += buf[i] * buf[i];
-  if (Math.sqrt(energy / n) < 0.006) return null;
+  if (Math.sqrt(energy / n) < minRms) return null;
 
   const window = Math.min(
     n - maxLag - 1,
